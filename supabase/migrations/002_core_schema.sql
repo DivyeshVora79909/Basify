@@ -44,6 +44,21 @@ CREATE TABLE public.roles (
 CREATE INDEX idx_roles_path ON public.roles USING GIST (path);
 CREATE INDEX idx_roles_tenant ON public.roles(tenant_id);
 
+-- 5.1 PREVENT TENANT REASSIGNMENT
+CREATE OR REPLACE FUNCTION public.prevent_role_tenant_change()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.tenant_id != OLD.tenant_id THEN
+        RAISE EXCEPTION 'Cannot change tenant_id on a role';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER on_role_tenant_change
+BEFORE UPDATE OF tenant_id ON public.roles
+FOR EACH ROW EXECUTE FUNCTION public.prevent_role_tenant_change();
+
 -- 6. ROLE PERMISSIONS
 CREATE TABLE public.role_permissions (
     role_id UUID REFERENCES public.roles(id) ON DELETE CASCADE,

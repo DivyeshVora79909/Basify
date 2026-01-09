@@ -1,7 +1,21 @@
 -- 1. Utility: Get Current Tenant
 CREATE OR REPLACE FUNCTION app_internal.current_tenant_id()
-RETURNS uuid LANGUAGE sql STABLE
-AS $$ SELECT (auth.jwt() -> 'app_metadata' ->> 'tenant_id')::uuid; $$;
+RETURNS uuid LANGUAGE plpgsql STABLE SECURITY DEFINER
+AS $$
+DECLARE
+    v_jwt_tenant_id uuid;
+    v_profile_tenant_id uuid;
+BEGIN
+    v_jwt_tenant_id := (auth.jwt() -> 'app_metadata' ->> 'tenant_id')::uuid;
+    SELECT tenant_id INTO v_profile_tenant_id FROM public.profiles WHERE id = auth.uid();
+    
+    IF v_jwt_tenant_id IS NULL OR v_jwt_tenant_id != v_profile_tenant_id THEN
+        RETURN NULL;
+    END IF;
+    
+    RETURN v_profile_tenant_id;
+END;
+$$;
 
 -- 2. Utility: Get My Role Path
 CREATE OR REPLACE FUNCTION app_internal.get_my_role_path()
@@ -24,18 +38,28 @@ AS $$
 DECLARE
     v_perms text[];
 BEGIN
-    SELECT ARRAY_AGG(DISTINCT p.slug)
+    SELECT ARRAY_AGG(DISTINCT slug)
     INTO v_perms
-    FROM public.profiles prof
-    JOIN public.roles r ON prof.role_id = r.id
-    -- 1. Definition Permissions
-    LEFT JOIN public.role_definitions rd ON r.definition_id = rd.id
-    LEFT JOIN public.role_definition_permissions rdp ON rd.id = rdp.role_definition_id
-    LEFT JOIN public.permissions perm_def ON rdp.permission_id = perm_def.id
-    -- 2. Custom Role Permissions
-    LEFT JOIN public.role_permissions rp ON r.id = rp.role_id
-    LEFT JOIN public.permissions perm_cust ON rp.permission_id = perm_cust.id
-    WHERE prof.id = p_user_id;
+    FROM (
+        -- 1. Get permissions from the Role Definition (e.g. "Tenant Owner" defaults)
+        SELECT p.slug
+        FROM public.profiles prof
+        JOIN public.roles r ON prof.role_id = r.id
+        JOIN public.role_definitions rd ON r.definition_id = rd.id
+        JOIN public.role_definition_permissions rdp ON rd.id = rdp.role_definition_id
+        JOIN public.permissions p ON rdp.permission_id = p.id
+        WHERE prof.id = p_user_id
+        
+        UNION
+        
+        -- 2. Get permissions from Custom Role Overrides (Specific to this role instance)
+        SELECT p.slug
+        FROM public.profiles prof
+        JOIN public.roles r ON prof.role_id = r.id
+        JOIN public.role_permissions rp ON r.id = rp.role_id
+        JOIN public.permissions p ON rp.permission_id = p.id
+        WHERE prof.id = p_user_id
+    ) combined_perms;
 
     RETURN COALESCE(v_perms, '{}'::text[]);
 END;
